@@ -44,6 +44,35 @@ def default_root() -> str:
     return os.getenv("VIEWER_DATASET_ROOT", "../codex1")
 
 
+def codex1_candidates() -> list[Path]:
+    """Komşu codex1 deposunun olası yerleri (en olası ilk)."""
+    here = Path(__file__).resolve().parent.parent
+    return [
+        here.parent / "codex1",
+        here / ".." / "codex1",
+        Path.cwd() / ".." / "codex1",
+        Path("/home/user/codex1"),
+    ]
+
+
+def first_valid_codex1() -> Path | None:
+    for c in codex1_candidates():
+        p = DatasetPaths.from_root(c)
+        if p.is_valid:
+            return p.root
+    return None
+
+
+def find_run_export(paths: "DatasetPaths", run_id: str) -> Path | None:
+    """exports/violations_<name>_<id[:8]>.xlsx eşleşmesini bul."""
+    if not paths.exports_dir.exists():
+        return None
+    prefix = run_id[:8]
+    for f in paths.exports_dir.glob(f"violations_*_{prefix}.xlsx"):
+        return f
+    return None
+
+
 def resolve_artifact(paths: DatasetPaths, file_path: str | None) -> Path | None:
     """Codex1 görece yollarını dataset köküne göre çöz."""
     if not file_path:

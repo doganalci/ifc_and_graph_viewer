@@ -8,6 +8,12 @@ Veri tabanını yazmaz, dosyaları değiştirmez; sadece görselleştirir.
 
 ## Özellikler
 
+- 📂 **Veri kaynağı seçici** — Sidebar'da iki mod:
+  📦 *codex1 (komşu repo)* otomatik bulur, 📂 *Özel yol* ile başka dataset.
+- 📜 **İhlal Havuzu tabı** — Run seç → meta header (method/llm/batch/token),
+  filtreli Excel benzeri ihlal tablosu (kategori/şiddet/batch/arama),
+  kategori-şiddet-batch dağılım grafikleri, satır seç → kanıt zinciri,
+  `exports/` Excel'i tek tıkla indir.
 - 📋 **Sidebar dosya listesi** — Kind filtresi + isim/id araması + scrollable
   liste. Tıklayınca detay paneli yüklenir.
 - ◀▶ **Sıralı gezinme** — Detay başlığında `Önceki / 3 / 47 / Sonraki`.

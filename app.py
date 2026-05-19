@@ -9,7 +9,13 @@ import pandas as pd
 import streamlit as st
 
 from viewer import db
-from viewer.config import DatasetPaths, default_root, resolve_artifact
+from viewer.config import (
+    DatasetPaths,
+    default_root,
+    find_run_export,
+    first_valid_codex1,
+    resolve_artifact,
+)
 
 st.set_page_config(
     page_title="Erişilebilirlik Dataset Viewer",
@@ -44,6 +50,11 @@ def _children(db_path_str: str, parent_id: str) -> list[dict]:
     return db.list_children(Path(db_path_str), parent_id)
 
 
+@st.cache_data(show_spinner=False)
+def _violations(db_path_str: str, run_id: str) -> list[dict]:
+    return db.get_violations(Path(db_path_str), run_id)
+
+
 def _ifc_dataframe(paths: DatasetPaths) -> pd.DataFrame:
     models = _ifc_models(str(paths.db))
     counts = _label_counts(str(paths.db))
@@ -76,22 +87,62 @@ def _label_for(row) -> str:
 
 
 # ---------------- Sidebar ----------------
+def _resolve_root() -> str:
+    """Sidebar'daki kaynak seçimine göre kök yolu döndür."""
+    mode = st.session_state.get("ds_mode", "codex1")
+    if mode == "codex1":
+        c = first_valid_codex1()
+        if c:
+            return str(c)
+        return default_root()
+    return st.session_state.get("ds_custom_path", default_root())
+
+
 def _sidebar(df_full: pd.DataFrame | None) -> DatasetPaths | None:
-    st.sidebar.markdown("### 📂 Dataset")
-    current = st.session_state.get("dataset_root", default_root())
-    new = st.sidebar.text_input("Kök yol (codex1)", value=current,
-                                help="violation_pool.sqlite ve ifc_models/")
-    if new != current:
-        st.session_state["dataset_root"] = new
+    st.sidebar.markdown("### 📂 Veri Kaynağı")
+    prev_mode = st.session_state.get("ds_mode", "codex1")
+    mode = st.sidebar.radio(
+        "Kaynak",
+        ["codex1", "custom"],
+        index=0 if prev_mode == "codex1" else 1,
+        format_func=lambda x: {
+            "codex1": "📦 codex1 (komşu repo)",
+            "custom": "📂 Özel yol",
+        }[x],
+        key="ds_mode",
+        horizontal=True,
+    )
+
+    if mode == "codex1":
+        c = first_valid_codex1()
+        if c:
+            st.sidebar.caption(f"`{c}`")
+            root = str(c)
+        else:
+            st.sidebar.warning("Komşu codex1 bulunamadı. 'Özel yol'a geç.")
+            root = default_root()
+    else:
+        prev = st.session_state.get("ds_custom_path",
+                                    st.session_state.get("dataset_root",
+                                                         default_root()))
+        root = st.sidebar.text_input(
+            "Kök yol", value=prev,
+            help="İçinde violation_pool.sqlite ve ifc_models/ olan klasör",
+            key="ds_custom_path",
+        )
+
+    prev_root = st.session_state.get("dataset_root")
+    if root != prev_root or mode != prev_mode:
+        st.session_state["dataset_root"] = root
         st.cache_data.clear()
         st.session_state.pop("selected_ifc_id", None)
 
-    paths = DatasetPaths.from_root(new)
+    paths = DatasetPaths.from_root(root)
     if not paths.is_valid:
         st.sidebar.error(f"❌ Bulunamadı: {paths.db}")
         return None
 
-    st.sidebar.success(f"✅ {paths.root}")
+    st.sidebar.success(f"✅ {paths.root.name}")
     s = _summary(str(paths.db))
     c1, c2 = st.sidebar.columns(2)
     c1.metric("Run", s["runs"]); c2.metric("Kural", s["violations"])
@@ -140,6 +191,187 @@ def _sidebar(df_full: pd.DataFrame | None) -> DatasetPaths | None:
         st.session_state["selected_ifc_id"] = sel
 
     return paths
+
+
+# ---------------- Pool / Violations ----------------
+_METHOD_LABELS = {
+    "naive": "1) Naive",
+    "optimized": "2) Optimized",
+    "rag": "3) RAG + optimized",
+    "finetune": "4) Fine-tune + optimized",
+}
+
+
+def page_pool(paths: DatasetPaths) -> None:
+    runs = _runs(str(paths.db))
+    if not runs:
+        st.info("Henüz hiçbir ihlal havuzu (run) yok.")
+        return
+
+    st.subheader("📜 İhlal Havuzu")
+    run_options = {
+        f"{r['name']}  ·  {_METHOD_LABELS.get(r['method'], r['method'])}  "
+        f"·  {r['status']}  ·  {r['llm_model']}": r["id"]
+        for r in runs
+    }
+    sel_label = st.selectbox("Run", list(run_options.keys()), key="pool_run")
+    run_id = run_options[sel_label]
+    run = db.get_run(paths.db, run_id)
+    if not run:
+        st.error("Run okunamadı.")
+        return
+
+    viols = _violations(str(paths.db), run_id)
+
+    # Meta header
+    mc = st.columns(5)
+    mc[0].metric("Toplam ihlal", len(viols))
+    batches = sorted({v.get("batch_no") for v in viols if v.get("batch_no")})
+    mc[1].metric("Batch", len(batches))
+    mc[2].metric("Status", run["status"])
+    usage = db.usage_totals(paths.db, pool_run_id=run_id)
+    mc[3].metric("LLM çağrı", usage["calls"])
+    mc[4].metric("Token", f"{usage['total_tokens']:,}")
+
+    with st.expander("Run meta"):
+        meta = {
+            "id": run["id"],
+            "name": run["name"],
+            "method": _METHOD_LABELS.get(run["method"], run["method"]),
+            "llm_model": run["llm_model"],
+            "embedding_model": run.get("embedding_model"),
+            "rag_collection": run.get("rag_collection"),
+            "rag_documents": run.get("rag_documents"),
+            "finetune_model_id": run.get("finetune_model_id"),
+            "created_at": run["created_at"],
+            "updated_at": run["updated_at"],
+        }
+        st.json({k: v for k, v in meta.items() if v not in (None, "", [])})
+        if run.get("prompt"):
+            st.markdown("**Prompt:**")
+            st.code(run["prompt"])
+
+    # Excel download
+    xlsx = find_run_export(paths, run_id)
+    if xlsx and xlsx.exists():
+        try:
+            data = xlsx.read_bytes()
+            st.download_button(
+                f"⬇️ Excel indir ({xlsx.name}, {len(data) / 1024:.1f} KB)",
+                data=data, file_name=xlsx.name, key=f"dl_xlsx_{run_id}",
+                type="primary",
+            )
+        except Exception as e:
+            st.warning(f"Excel okunamadı: {e}")
+
+    if not viols:
+        st.info("Bu run'da ihlal yok.")
+        return
+
+    # Build df
+    rows = []
+    for v in viols:
+        rows.append({
+            "title": v.get("title"),
+            "category": v.get("category"),
+            "severity": v.get("severity"),
+            "threshold": v.get("threshold"),
+            "batch": v.get("batch_no"),
+            "evidence": len(v.get("evidence", [])),
+            "description": v.get("description"),
+            "id": v["id"],
+        })
+    vdf = pd.DataFrame(rows)
+
+    # Filters
+    f1, f2, f3, f4 = st.columns([1, 1, 1, 2])
+    with f1:
+        cats = ["(hepsi)"] + sorted(
+            {c for c in vdf["category"].tolist() if c}
+        )
+        cat = st.selectbox("Kategori", cats, key="pool_cat")
+    with f2:
+        sevs = ["(hepsi)"] + sorted(
+            {s for s in vdf["severity"].tolist() if s}
+        )
+        sev = st.selectbox("Şiddet", sevs, key="pool_sev")
+    with f3:
+        bsel = ["(hepsi)"] + [str(b) for b in batches]
+        b = st.selectbox("Batch", bsel, key="pool_batch")
+    with f4:
+        q = st.text_input("Ara (title / description)", "", key="pool_q")
+
+    f = vdf.copy()
+    if cat != "(hepsi)":
+        f = f[f["category"] == cat]
+    if sev != "(hepsi)":
+        f = f[f["severity"] == sev]
+    if b != "(hepsi)":
+        f = f[f["batch"] == int(b)]
+    if q:
+        ql = q.lower()
+        f = f[f["title"].fillna("").str.lower().str.contains(ql)
+              | f["description"].fillna("").str.lower().str.contains(ql)]
+
+    st.caption(f"{len(f)} / {len(vdf)} kayıt")
+    st.dataframe(
+        f.drop(columns=["id"]),
+        use_container_width=True, hide_index=True, height=420,
+        column_config={
+            "title": st.column_config.TextColumn("title", width="medium"),
+            "description": st.column_config.TextColumn("description", width="large"),
+        },
+    )
+
+    # Charts
+    if not f.empty:
+        with st.expander("📊 Dağılımlar"):
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.markdown("**Kategori**")
+                cc = f["category"].fillna("(boş)").value_counts()
+                st.bar_chart(cc)
+            with c2:
+                st.markdown("**Şiddet**")
+                sc = f["severity"].fillna("(boş)").value_counts()
+                st.bar_chart(sc)
+            with c3:
+                st.markdown("**Batch**")
+                bc = f["batch"].fillna(0).value_counts().sort_index()
+                st.bar_chart(bc)
+
+    # Drilldown
+    st.markdown("### 🔗 Kanıt zinciri")
+    if f.empty:
+        st.caption("Filtre kayıtları boşalttı.")
+        return
+    pick_options = {
+        f"{r['title'] or '(başlıksız)'}  ·  {r['category'] or '-'}  "
+        f"·  batch {r['batch']}  ·  {r['id'][:8]}": r["id"]
+        for _, r in f.iterrows()
+    }
+    sel_v_label = st.selectbox(
+        "İhlal seç", list(pick_options.keys()), key=f"pool_pick_{run_id}",
+    )
+    vid = pick_options[sel_v_label]
+    v = next((x for x in viols if x["id"] == vid), None)
+    if v:
+        st.json({
+            "id": v["id"],
+            "title": v.get("title"),
+            "category": v.get("category"),
+            "severity": v.get("severity"),
+            "threshold": v.get("threshold"),
+            "batch_no": v.get("batch_no"),
+            "description": v.get("description"),
+        })
+        ev = v.get("evidence", [])
+        if ev:
+            st.markdown(f"**Kanıtlar ({len(ev)}):**")
+            st.dataframe(pd.DataFrame(ev),
+                         use_container_width=True, hide_index=True)
+        else:
+            st.caption("Kanıt yok.")
 
 
 # ---------------- Browser ----------------
@@ -493,11 +725,15 @@ def main() -> None:
         return
 
     df = df_full if df_full is not None else _ifc_dataframe(paths)
-    tab_detail, tab_browser = st.tabs(["🔍 Detay", "🗂️ Browser"])
+    tab_detail, tab_browser, tab_pool = st.tabs(
+        ["🔍 IFC Detay", "🗂️ Browser", "📜 İhlal Havuzu"]
+    )
     with tab_detail:
         page_detail(paths)
     with tab_browser:
         page_browser(paths, df)
+    with tab_pool:
+        page_pool(paths)
 
 
 if __name__ == "__main__":
