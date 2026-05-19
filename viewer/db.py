@@ -44,6 +44,16 @@ def get_ifc_model(db_path: Path, ifc_id: str) -> dict | None:
     return dict(r) if r else None
 
 
+def list_children(db_path: Path, parent_id: str) -> list[dict]:
+    """parent_id'ye bağlı violated IFC'ler (baseline → violated türevleri)."""
+    with _ro(db_path) as c:
+        return _rows(
+            c,
+            "SELECT * FROM ifc_models WHERE parent_id=? ORDER BY datetime(created_at) DESC",
+            (parent_id,),
+        )
+
+
 def list_ifc_labels(db_path: Path, ifc_id: str) -> list[dict]:
     with _ro(db_path) as c:
         return _rows(
